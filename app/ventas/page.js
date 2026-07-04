@@ -15,7 +15,7 @@ export default function Ventas() {
   const [productos, setProductos] = useState([])
   const [carrito, setCarrito] = useState([])
   const [procesandoCobro, setProcesandoCobro] = useState(false)
-  const [tipoVenta, setTipoVenta] = useState('no_oficial') 
+  const [tipoVenta, setTipoVenta] = useState('al_paso') 
   const [metodoPagoVenta, setMetodoPagoVenta] = useState('efectivo') 
 
   const [pedidosOnline, setPedidosOnline] = useState([])
@@ -38,8 +38,6 @@ export default function Ventas() {
   const [productoAEditar, setProductoAEditar] = useState({ id: null, nombre: '', precio_venta: 0, stock_actual: 0 })
   const [alertasCriticas, setAlertasCriticas] = useState([])
 
-  const [modalConfirmVaciarOpen, setModalConfirmVaciarOpen] = useState(false)
-  const [logVentasNoOficiales, setLogVentasNoOficiales] = useState([])
   const [toast, setToast] = useState({ show: false, message: '', type: 'success' })
   const [modalBoletaOpen, setModalBoletaOpen] = useState(false)
   const [boletaData, setBoletaData] = useState(null)
@@ -123,10 +121,6 @@ export default function Ventas() {
         setUser(perfil)
         setLoading(false)
         await supabase.from('perfiles').update({ is_online: true }).eq('id', perfil.id)
-
-        // 🚀 MODIFICACIÓN DE SEGURIDAD: Jalar el TXT local aislado con la ID única de este trabajador
-        const guardadoLocal = localStorage.getItem(`emporio_txt_${perfil.id}`)
-        if (guardadoLocal) setLogVentasNoOficiales(JSON.parse(guardadoLocal))
         
         cargarPedidosVirtualesEnCola(perfil.id)
         cargarVentasNubeHoy(perfil.id)
@@ -169,19 +163,17 @@ export default function Ventas() {
     router.push('/')
   }
 
-  // ─── EDICIÓN RÁPIDA DE STOCK Y PRECIO ───
   const guardarEdicionRapida = async (e) => {
     e.preventDefault()
     await supabase.from('productos').update({ precio_venta: parseFloat(productoAEditar.precio_venta), stock_actual: parseFloat(productoAEditar.stock_actual) }).eq('id', productoAEditar.id)
     try {
-      await supabase.from('alertas_sistema').insert([{ tipo: 'auditoria_precio', mensaje: `El cajero ${user.nombre} modificó ${productoAEditar.nombre}. Precio: S/${productoAEditar.precio_venta} | Stock: ${productoAEditar.stock_actual}`, leido: false }])
+      await supabase.from('alertas_sistema').insert([{ emisor_email: 'SISTEMA_AUDITORIA', mensaje: `El cajero ${user.nombre} modificó ${productoAEditar.nombre}. Precio: S/${productoAEditar.precio_venta} | Stock: ${productoAEditar.stock_actual}` }])
     } catch(err) {}
     mostrarNotificacion(`Producto ${productoAEditar.nombre} actualizado al instante.`)
     setModalEdicionProductoOpen(false)
     buscarProductos()
   }
 
-  // ─── LÓGICA DE CARRITO Y PEDIDOS WEB ───
   const cargarPedidoVirtualACaja = (pedido) => {
     const itemsAdaptados = pedido.items_pedidos.map(it => {
       const original = productos.find(p => p.id === it.producto_id) || {}
@@ -232,17 +224,12 @@ export default function Ventas() {
   const total = carrito.reduce((acc, item) => acc + (item.precio_venta * item.cantidad), 0)
   const igv = total * 0.18; const subtotal = total - igv
 
-  // ─── RENDIMIENTO Y ARQUEO COHERENTE ───
-  const totalVentasNube = ventasNubeHoy.reduce((acc, v) => acc + parseFloat(v.total), 0)
-  const totalVentasTXT = logVentasNoOficiales.reduce((acc, v) => acc + parseFloat(v.total), 0)
-  const granTotalDia = totalVentasNube + totalVentasTXT
-  
-  // Desglose de auditoría Efectivo vs Digital combinado
-  const arqueoEfectivo = logVentasNoOficiales.filter(v => v.metodo_pago === 'efectivo').reduce((a,v) => a + parseFloat(v.total), 0) + 
-                         ventasNubeHoy.filter(v => JSON.stringify(v.ticket_json).includes('efectivo')).reduce((a,v) => a + parseFloat(v.total), 0)
+  // ─── RENDIMIENTO TOTAL BASADO 100% EN SUPABASE ───
+  const granTotalDia = ventasNubeHoy.reduce((acc, v) => acc + parseFloat(v.total), 0)
+  const arqueoEfectivo = ventasNubeHoy.filter(v => v.ticket_json?.metodo_pago === 'efectivo').reduce((a,v) => a + parseFloat(v.total), 0)
   const arqueoDigital = granTotalDia - arqueoEfectivo 
 
-  // ─── PROCESADORES DE COBRO ───
+  // ─── PROCESADORES DE COBRO UNIFICADOS A LA NUBE ───
   const handleBotonCobrarPrincipal = () => {
     if (carrito.length === 0) return mostrarNotificacion('No hay artículos.', 'error')
     if (tipoVenta === 'oficial') setModalClienteOpen(true) 
@@ -257,40 +244,55 @@ export default function Ventas() {
     }
   }
 
+  // 🔥 CORE FIX: Las ventas al paso ahora sí se inyectan a Supabase
   const procesarTransaccionTxtAlPaso = async () => {
     setProcesandoCobro(true)
     const clientePorDefecto = { dni: '00000000', nombre: 'PÚBLICO GENERAL (AL PASO)', direccion: 'S/N - JULIACA' }
     const numOperacionRandom = Math.floor(1000 + Math.random() * 9000)
     const comprobanteFormatoCorrelativo = `T001-${String(numOperacionRandom).padStart(8, '0')}`
 
-    const nuevaVentaNoOficial = { 
-      id_ticket: comprobanteFormatoCorrelativo, fecha: new Date().toLocaleString(), cliente: clientePorDefecto.nombre, dni: clientePorDefecto.dni, 
-      total: total.toFixed(2), productos: carrito.map(i => `${i.nombre} (${i.cantidad})`).join(', '), metodo_pago: metodoPagoVenta
+    const estructuraJsonItems = { 
+      items: carrito.map(item => ({ producto_id: item.id, nombre: item.nombre, cantidad: item.cantidad, precio_cobrado: item.precio_venta, unidad_medida: item.esPorPeso ? 'KG' : 'UND' })), 
+      metodo_pago: metodoPagoVenta,
+      tipo_comprobante: 'AL PASO',
+      id_ticket: comprobanteFormatoCorrelativo
     }
     
-    const nuevoLogActualizado = [...logVentasNoOficiales, nuevaVentaNoOficial]
-    setLogVentasNoOficiales(nuevoLogActualizado)
-    
-    // 🚀 MODIFICACIÓN: Inyectar la venta en la clave única amarrada a este operador
-    localStorage.setItem(`emporio_txt_${user.id}`, JSON.stringify(nuevoLogActualizado))
-    
+    // 1. Guardar venta en la Nube (El admin la verá instantáneamente)
+    const { error: errorVenta } = await supabase.from('ventas_nube').insert([{ 
+      total: total, vendedor_id: user.id, cliente: clientePorDefecto.nombre, dni: clientePorDefecto.dni, ticket_json: estructuraJsonItems 
+    }])
+    if (errorVenta) { setProcesandoCobro(false); return mostrarNotificacion(`Error: ${errorVenta.message}`, 'error') }
+
+    // 2. Descontar Stock Oficialmente
+    for (const item of carrito) {
+      await supabase.from('productos').update({ stock_actual: item.stock_actual - item.cantidad }).eq('id', item.id)
+    }
+
     await purgarPedidoVirtualAtendido() 
 
-    setBoletaData({ numOperacion: comprobanteFormatoCorrelativo, fecha: nuevaVentaNoOficial.fecha, cajero: user.nombre, cliente: clientePorDefecto, items: carrito, total: total, igv: igv, subtotal: subtotal, categoria: 'TICKET DE VENTA' })
-    setCarrito([]); setProcesandoCobro(false); setModalBoletaOpen(true)
+    setBoletaData({ numOperacion: comprobanteFormatoCorrelativo, fecha: new Date().toLocaleString(), cajero: user.nombre, cliente: clientePorDefecto, items: carrito, total: total, igv: igv, subtotal: subtotal, categoria: 'TICKET RÁPIDO' })
+    setCarrito([]); setProcesandoCobro(false); setModalBoletaOpen(true); buscarProductos(); cargarVentasNubeHoy(user.id)
   }
 
   const handleProcesarPagoNubeOficial = async (e) => {
     e.preventDefault(); if (!clienteDni.trim() || !clienteNombre.trim()) return mostrarNotificacion('Campos vacíos.', 'error')
     setProcesandoCobro(true)
     const clienteOficial = { dni: clienteDni, nombre: clienteNombre, direccion: clienteDireccion || 'S/N' }
-    const estructuraJsonItems = { items: carrito.map(item => ({ producto_id: item.id, nombre: item.nombre, cantidad: item.cantidad, precio_cobrado: item.precio_venta, unidad_medida: item.esPorPeso ? 'KG' : 'UND' })), metodo_pago: metodoPagoVenta }
+    const estructuraJsonItems = { 
+      items: carrito.map(item => ({ producto_id: item.id, nombre: item.nombre, cantidad: item.cantidad, precio_cobrado: item.precio_venta, unidad_medida: item.esPorPeso ? 'KG' : 'UND' })), 
+      metodo_pago: metodoPagoVenta,
+      tipo_comprobante: 'OFICIAL'
+    }
 
     if (registrarComoCasero) await supabase.from('clientes_frecuentes').upsert([{ dni: clienteOficial.dni, nombre: clienteOficial.nombre, direccion: clienteOficial.direccion }], { onConflict: 'dni' })
     const { error: errorVenta } = await supabase.from('ventas_nube').insert([{ total: total, vendedor_id: user.id, cliente: clienteOficial.nombre, dni: clienteOficial.dni, ticket_json: estructuraJsonItems }])
     if (errorVenta) { setProcesandoCobro(false); return mostrarNotificacion(`Error: ${errorVenta.message}`, 'error') }
 
-    for (const item of carrito) await supabase.from('productos').update({ stock_actual: item.stock_actual - item.cantidad }).eq('id', item.id)
+    // Descontar Stock Oficialmente
+    for (const item of carrito) {
+      await supabase.from('productos').update({ stock_actual: item.stock_actual - item.cantidad }).eq('id', item.id)
+    }
 
     await purgarPedidoVirtualAtendido() 
 
@@ -300,8 +302,7 @@ export default function Ventas() {
     setCarrito([]); setClienteDni(''); setClienteNombre(''); setClienteDireccion(''); setRegistrarComoCasero(false); setProcesandoCobro(false); setModalClienteOpen(false); setModalBoletaOpen(true); buscarProductos(); cargarVentasNubeHoy(user.id)
   }
 
-  // 🚀 NUEVA MEJORA MAESTRA: Súper compilador de Cierre Combinado (Descarga automática obligatoria)
-  const finalizarTurnoYVaciarLocal = async () => {
+  const descargarCuadreDeCaja = async () => {
     let contenidoReporte = `==================================================\n`;
     contenidoReporte += `       EMPORIO - REPORTE DE CUADRE DE CAJA        \n`;
     contenidoReporte += `==================================================\n\n`;
@@ -314,41 +315,40 @@ export default function Ventas() {
     contenidoReporte += `⭐ GRAN TOTAL GENERAL     : S/ ${granTotalDia.toFixed(2)}\n`;
     contenidoReporte += `--------------------------------------------------\n\n`;
     
-    contenidoReporte += `🌐 [CANAL NUBE] DETALLE DE COMPROBANTES EMITIDOS:\n`;
-    if (ventasNubeHoy.length === 0) {
-      contenidoReporte += `Sin transacciones registradas en la nube.\n`;
+    const ventasOficiales = ventasNubeHoy.filter(v => v.ticket_json?.tipo_comprobante === 'OFICIAL')
+    const ventasAlPaso = ventasNubeHoy.filter(v => v.ticket_json?.tipo_comprobante === 'AL PASO')
+
+    contenidoReporte += `🌐 [VENTAS OFICIALES] DETALLE DE COMPROBANTES EMITIDOS:\n`;
+    if (ventasOficiales.length === 0) {
+      contenidoReporte += `Sin transacciones registradas.\n`;
     } else {
-      ventasNubeHoy.forEach((v, idx) => {
+      ventasOficiales.forEach((v, idx) => {
         contenidoReporte += `[${idx+1}] CLIENTE: ${v.cliente} | DNI: ${v.dni} | RECAUDADO: S/ ${parseFloat(v.total).toFixed(2)}\n`;
       });
     }
     
     contenidoReporte += `\n--------------------------------------------------\n\n`;
-    contenidoReporte += `📄 [CANAL LOCAL] DETALLE DE TICKETS RÁPIDOS (.TXT):\n`;
-    if (logVentasNoOficiales.length === 0) {
-      contenidoReporte += `Sin transacciones registradas en local.\n`;
+    contenidoReporte += `🚶‍♂️ [VENTAS AL PASO] DETALLE DE TICKETS RÁPIDOS:\n`;
+    if (ventasAlPaso.length === 0) {
+      contenidoReporte += `Sin transacciones registradas.\n`;
     } else {
-      logVentasNoOficiales.forEach((v, idx) => {
-        contenidoReporte += `[${idx+1}] REF: ${v.id_ticket} | CLIENTE: ${v.cliente} | TOTAL: S/ ${v.total} | VIA: ${v.metodo_pago.toUpperCase()}\n`;
+      ventasAlPaso.forEach((v, idx) => {
+        const ref = v.ticket_json?.id_ticket || `T00X`
+        const via = v.ticket_json?.metodo_pago || 'efectivo'
+        contenidoReporte += `[${idx+1}] REF: ${ref} | CLIENTE: ${v.cliente} | TOTAL: S/ ${v.total} | VIA: ${via.toUpperCase()}\n`;
       });
     }
     contenidoReporte += `\n==================================================\n`;
 
-    // Disparar la descarga forzada del archivo plano (.txt)
     const link = document.createElement('a')
     link.href = URL.createObjectURL(new Blob([contenidoReporte], { type: 'text/plain;charset=utf-8' }))
     link.download = `CUADRE_CAJA_${user.nombre.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.txt`
     link.click()
     
-    // 🚀 Purga selectiva: Limpia EXCLUSIVAMENTE la memoria local de ESTE operador
-    setLogVentasNoOficiales([])
-    localStorage.removeItem(`emporio_txt_${user.id}`)
-    
     setModalCierreCajaOpen(false)
-    mostrarNotificacion('Turno finalizado. Reporte combinado descargado y caja purgada con éxito.')
+    mostrarNotificacion('Reporte descargado con éxito. Puedes cerrar sesión de forma segura.')
   }
 
-  // ─── MOTOR DE IMPRESIÓN SUNAT ───
   const handleImprimirVoucher = () => {
     if (!boletaData) return
     const convertirMontoALetras = (monto) => {
@@ -370,7 +370,6 @@ export default function Ventas() {
       
       {toast.show && <div className="fixed top-6 right-6 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl border border-emerald-500/20 bg-slate-900/95 backdrop-blur-xl shadow-xl animate-fadeIn"><p className="text-[11px] font-bold text-emerald-100">{toast.message}</p></div>}
 
-      {/* TABLERO DE ALERTAS CRÍTICAS */}
       {alertasCriticas.length > 0 && (
         <div className="w-full max-w-[1400px] mx-auto mb-4 bg-red-950/40 border border-red-500/30 rounded-xl p-3 animate-pulse">
           {alertasCriticas.map((alerta, i) => (
@@ -379,7 +378,6 @@ export default function Ventas() {
         </div>
       )}
 
-      {/* HEADER CON RENDIMIENTO Y CUADRE DE CAJA */}
       <div className="w-full max-w-[1400px] mx-auto flex flex-col md:flex-row justify-between items-start md:items-center mb-5 pb-4 border-b border-white/5 gap-4">
         <div className="flex items-center gap-6">
           <div>
@@ -393,15 +391,18 @@ export default function Ventas() {
         </div>
         
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-          {/* BOTÓN REBRANDED: CUADRAR CAJA */}
-          <button onClick={() => setModalCierreCajaOpen(true)} className="px-4 py-2 bg-indigo-900/30 hover:bg-indigo-900/50 border border-indigo-500/20 text-indigo-400 text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all shadow-md">💰 Cuadrar Caja</button>
+          {user?.rol === 'admin' && (
+            <button onClick={() => router.push('/dashboard')} className="px-4 py-2 bg-indigo-900/30 hover:bg-indigo-900/50 border border-indigo-500/20 text-indigo-400 text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all shadow-md">
+              ⚙️ Volver a Admin
+            </button>
+          )}
+          <button onClick={() => setModalCierreCajaOpen(true)} className="px-4 py-2 bg-emerald-900/30 hover:bg-emerald-900/50 border border-emerald-500/20 text-emerald-400 text-[10px] font-bold uppercase tracking-wider rounded-xl transition-all shadow-md">💰 Cuadrar Caja</button>
           <button onClick={handleCerrarSesionSeguro} className="px-4 py-2 bg-slate-900/50 hover:bg-slate-800 text-slate-400 hover:text-white text-[10px] font-bold uppercase rounded-xl border border-white/5 transition-all ml-auto md:ml-0">Salir</button>
         </div>
       </div>
 
       <div className="w-full max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-4 gap-5 flex-1 items-start text-xs">
         
-        {/* COLUMNA 1: BANDEJA WEB */}
         <div className="bg-slate-900/40 border border-white/5 rounded-2xl p-4 flex flex-col min-h-[500px] shadow-xl">
           <div className="flex justify-between items-center border-b border-white/5 pb-3 mb-3">
             <h2 className="text-[11px] font-black uppercase tracking-widest text-indigo-400">Ordenes Web</h2>
@@ -427,7 +428,6 @@ export default function Ventas() {
           </div>
         </div>
 
-        {/* COLUMNAS 2 y 3: CATÁLOGO */}
         <div className="lg:col-span-2 bg-slate-900/40 border border-white/5 rounded-2xl p-4 flex flex-col min-h-[500px] shadow-xl">
           <input ref={inputBusquedaRef} type="text" placeholder="Escanear barra o escribir descripción..." value={buscar} onChange={(e) => setBuscar(e.target.value)} onKeyDown={handleKeyDownBusqueda} className="w-full px-4 py-2.5 mb-4 bg-slate-950 border border-white/5 focus:border-emerald-500/40 rounded-xl text-xs text-white focus:outline-none" />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 overflow-y-auto pr-1 max-h-[400px] custom-scrollbar">
@@ -440,7 +440,7 @@ export default function Ventas() {
                     <p className="text-[10px] text-slate-500 font-mono mt-0.5">{p.codigo_barras}</p>
                   </div>
                   <div className="text-right">
-                    <p className="text-xs font-black text-emerald-400">S/ {p.precio_venta.toFixed(2)}</p>
+                    <p className="text-xs font-black text-emerald-400">S/ {parseFloat(p.precio_venta).toFixed(2)}</p>
                     <span className={`text-[9px] font-bold block mt-0.5 ${p.stock_actual <= 0 ? 'text-red-500 animate-pulse' : 'text-slate-500'}`}>Stk: {p.stock_actual}</span>
                   </div>
                 </button>
@@ -449,7 +449,6 @@ export default function Ventas() {
           </div>
         </div>
 
-        {/* COLUMNA 4: DETALLE DE CAJA */}
         <div className="bg-slate-900/60 border border-white/5 rounded-2xl p-4 flex flex-col justify-between min-h-[500px] shadow-2xl">
           <div className="flex-1 flex flex-col min-h-0">
             <div className="flex justify-between items-center border-b border-white/5 pb-3 mb-3">
@@ -462,7 +461,7 @@ export default function Ventas() {
                   <div key={idx} className="flex justify-between items-center p-2 bg-slate-950/60 rounded-xl border border-white/5 text-xs">
                     <div className="truncate flex-1 pr-1.5"><p className="font-bold text-slate-300 truncate text-[11px]">{item.nombre}</p></div>
                     <div className="flex items-center gap-1.5">
-                      <input type="number" step={item.esPorPeso ? "0.001" : "1"} min="0.001" value={item.cantidad} onChange={(e) => handleCambiarCantidadCarrito(item.codigo_barras, e.target.value)} className="w-11 text-center py-0.5 bg-slate-900 border border-white/5 rounded text-[11px] text-white focus:outline-none" />
+                      <input type="number" step={item.esPorPeso ? "0.50" : "1"} min="0.50" value={item.cantidad} onChange={(e) => handleCambiarCantidadCarrito(item.codigo_barras, e.target.value)} className="w-11 text-center py-0.5 bg-slate-900 border border-white/5 rounded text-[11px] text-white focus:outline-none" />
                       <span className="font-bold font-mono text-emerald-400 w-12 text-right">S/ {(item.precio_venta * item.cantidad).toFixed(2)}</span>
                       <button onClick={() => eliminarDelCarrito(item.codigo_barras)} className="text-slate-600 hover:text-red-400 text-xs pl-1">✕</button>
                     </div>
@@ -483,8 +482,8 @@ export default function Ventas() {
             </div>
 
             <div className="bg-slate-950 p-1 rounded-lg border border-white/5 flex gap-1">
-              <button onClick={() => setTipoVenta('no_oficial')} className={`flex-1 py-1.5 text-[9px] font-bold uppercase rounded ${tipoVenta === 'no_oficial' ? 'bg-amber-600 text-white' : 'text-slate-500'}`}>📄 TXT</button>
-              <button onClick={() => setTipoVenta('oficial')} className={`flex-1 py-1.5 text-[9px] font-bold uppercase rounded ${tipoVenta === 'oficial' ? 'bg-emerald-600 text-white' : 'text-slate-500'}`}>🌐 Nube</button>
+              <button onClick={() => setTipoVenta('al_paso')} className={`flex-1 py-1.5 text-[9px] font-bold uppercase rounded ${tipoVenta === 'al_paso' ? 'bg-amber-600 text-white' : 'text-slate-500'}`}>🚶‍♂️ Al Paso</button>
+              <button onClick={() => setTipoVenta('oficial')} className={`flex-1 py-1.5 text-[9px] font-bold uppercase rounded ${tipoVenta === 'oficial' ? 'bg-emerald-600 text-white' : 'text-slate-500'}`}>📝 Oficial</button>
             </div>
             
             <div className="flex justify-between items-baseline pt-2 border-t border-white/5">
@@ -500,7 +499,6 @@ export default function Ventas() {
       </div>
 
       {/* ─── MODALS ─── */}
-      {/* 🚀 MODAL REBRANDED: CUADRE DE CAJA CON AUTO-DESCARGA Y PURGA TOTAL AISLADA */}
       {modalCierreCajaOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-slate-900 border border-indigo-500/30 rounded-2xl p-6 shadow-2xl animate-fadeIn relative overflow-hidden">
@@ -523,34 +521,28 @@ export default function Ventas() {
               </div>
             </div>
             
-            {/* BOTÓN CON AUTO-DESCARGA COMBINADA TOTAL Y PURGA PERSONAL */}
-            <button 
-              onClick={finalizarTurnoYVaciarLocal} 
-              className="w-full py-3 bg-gradient-to-r from-red-700 to-red-600 hover:from-red-600 hover:to-red-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all shadow-lg"
-            >
-              Cerrar Turno y Vaciar Caja
+            <button onClick={descargarCuadreDeCaja} className="w-full py-3 bg-gradient-to-r from-emerald-700 to-emerald-600 hover:from-emerald-600 hover:to-emerald-500 text-white text-[10px] font-black uppercase tracking-widest rounded-xl transition-all shadow-lg">
+              Cerrar Turno y Descargar
             </button>
-            <p className="text-[9px] text-slate-500 text-center mt-3">Descargará el balance completo (.txt) de tu turno y limpiará solo tu historial.</p>
+            <p className="text-[9px] text-slate-500 text-center mt-3">Descargará el balance completo (.txt) de tu turno.</p>
           </div>
         </div>
       )}
 
-      {/* MODAL EDICIÓN RÁPIDA */}
       {modalEdicionProductoOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-xs bg-slate-900 border border-white/10 rounded-2xl p-6 shadow-2xl animate-fadeIn">
             <h3 className="text-xs font-black tracking-widest text-emerald-400 uppercase mb-4">Editar Producto</h3>
             <p className="text-sm font-bold text-slate-200 truncate mb-4">{productoAEditar.nombre}</p>
             <form onSubmit={guardarEdicionRapida} className="space-y-4">
-              <div><label className="text-[10px] font-bold uppercase text-slate-400 block mb-1">Precio Venta (S/)</label><input type="number" step="0.01" value={productoAEditar.precio_venta} onChange={(e) => setProductoAEditar({...productoAEditar, precio_venta: e.target.value})} className="w-full px-3 py-2 bg-slate-950 border border-white/5 rounded-xl text-xs text-white focus:outline-none" required /></div>
-              <div><label className="text-[10px] font-bold uppercase text-slate-400 block mb-1">Stock Físico Real</label><input type="number" step="0.01" value={productoAEditar.stock_actual} onChange={(e) => setProductoAEditar({...productoAEditar, stock_actual: e.target.value})} className="w-full px-3 py-2 bg-slate-950 border border-white/5 rounded-xl text-xs text-white focus:outline-none" required /></div>
+              <div><label className="text-[10px] font-bold uppercase text-slate-400 block mb-1">Precio Venta (S/)</label><input type="number" step="0.50" value={productoAEditar.precio_venta} onChange={(e) => setProductoAEditar({...productoAEditar, precio_venta: e.target.value})} className="w-full px-3 py-2 bg-slate-950 border border-white/5 rounded-xl text-xs text-white focus:outline-none" required /></div>
+              <div><label className="text-[10px] font-bold uppercase text-slate-400 block mb-1">Stock Físico Real</label><input type="number" step="1" value={productoAEditar.stock_actual} onChange={(e) => setProductoAEditar({...productoAEditar, stock_actual: e.target.value})} className="w-full px-3 py-2 bg-slate-950 border border-white/5 rounded-xl text-xs text-white focus:outline-none" required /></div>
               <div className="flex gap-2 pt-2"><button type="button" onClick={() => setModalEdicionProductoOpen(false)} className="flex-1 py-2 bg-slate-800 text-slate-300 text-[10px] font-bold uppercase rounded-lg">Cancelar</button><button type="submit" className="flex-1 py-2 bg-emerald-600 text-white text-[10px] font-bold uppercase rounded-lg shadow-lg">Guardar</button></div>
             </form>
           </div>
         </div>
       )}
 
-      {/* MODAL COBRO CLIENTE */}
       {modalClienteOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-slate-900 border border-white/10 rounded-2xl p-6 space-y-4">
@@ -571,7 +563,6 @@ export default function Ventas() {
         </div>
       )}
 
-      {/* SUB-MODAL DIRECTIVOS CASEROS */}
       {modalCaserosOpen && (
         <div className="fixed inset-0 z-[60] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-slate-900 border border-white/10 rounded-2xl p-5 space-y-4 shadow-2xl animate-fadeIn">
@@ -586,7 +577,6 @@ export default function Ventas() {
         </div>
       )}
 
-      {/* MODAL CONFIRMACIONES INTERNAS Y COMPROBANTE */}
       {modalBoletaOpen && boletaData && (
         <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-xs bg-white text-slate-900 rounded-xl p-5 font-mono text-[11px] space-y-3 shadow-2xl">
